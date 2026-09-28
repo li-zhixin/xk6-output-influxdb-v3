@@ -21,14 +21,14 @@ func TestNew(t *testing.T) {
 	t.Parallel()
 	logger := logrus.New()
 
-	t.Run("BucketRequired", func(t *testing.T) {
+	t.Run("DatabaseRequired", func(t *testing.T) {
 		t.Parallel()
 		_, err := New(output.Params{
 			Logger:         logger,
 			ConfigArgument: "/",
 		})
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "Bucket option is required")
+		require.Contains(t, err.Error(), "Database option is required")
 	})
 	t.Run("ConcurrentWrites", func(t *testing.T) {
 		t.Parallel()
@@ -39,7 +39,7 @@ func TestNew(t *testing.T) {
 			for _, tc := range tests {
 				_, err := New(output.Params{
 					Logger:     logger,
-					JSONConfig: json.RawMessage(fmt.Sprintf(`{"bucket":"b","concurrentWrites":%q}`, tc)),
+					JSONConfig: json.RawMessage(fmt.Sprintf(`{"database":"b","concurrentWrites":%q}`, tc)),
 				})
 				require.Error(t, err)
 				require.Equal(t, "the ConcurrentWrites option must be a positive number", err.Error())
@@ -51,18 +51,39 @@ func TestNew(t *testing.T) {
 
 			_, err := New(output.Params{
 				Logger:     logger,
-				JSONConfig: json.RawMessage(`{"bucket":"b","concurrentWrites":"2"}`),
+				JSONConfig: json.RawMessage(`{"database":"b","concurrentWrites":"2"}`),
 			})
 			require.NoError(t, err)
 		})
 	})
 }
 
+func TestInvalidConfig(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ config, message string }{
+		{`{"bucket":"legacy"}`, "Database option is required"},
+		{`{"database":"test","precision":"1m"}`, "Precision option must be"},
+		{`{"database":"test","precision":"0s"}`, "Precision option must be"},
+		{`{"database":"test","writeTimeout":"0s"}`, "WriteTimeout option must be positive"},
+		{`{"database":"test","writeTimeout":"-1s"}`, "WriteTimeout option must be positive"},
+		{`{"database":"test","addr":"localhost:8181"}`, "Addr option must be"},
+		{`{"database":"test","addr":"ftp://localhost"}`, "Addr option must be"},
+		{`{"database":"test","tagsAsFields":["value"]}`, "value is reserved"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.config, func(t *testing.T) {
+			t.Parallel()
+			_, err := New(output.Params{Logger: logrus.New(), JSONConfig: json.RawMessage(tc.config)})
+			require.ErrorContains(t, err, tc.message)
+		})
+	}
+}
+
 func TestExtractTagsToValues(t *testing.T) {
 	t.Parallel()
 	o, err := New(output.Params{
 		Logger:     logrus.New(),
-		JSONConfig: []byte(`{"bucket":"mybucket","tagsAsFields":["stringField","stringField2:string","boolField:bool","floatField:float","intField:int"]}`),
+		JSONConfig: []byte(`{"database":"mybucket","tagsAsFields":["stringField","stringField2:string","boolField:bool","floatField:float","intField:int"]}`),
 	})
 	require.NoError(t, err)
 	tags := map[string]string{
@@ -87,7 +108,7 @@ func testOutputCycle(t testing.TB, handler http.HandlerFunc, body func(testing.T
 
 	c, err := New(output.Params{
 		Logger:         logrus.New(),
-		ConfigArgument: fmt.Sprintf("%s/testbucket", ts.URL),
+		ConfigArgument: fmt.Sprintf("%s/testdatabase", ts.URL),
 	})
 	require.NoError(t, err)
 
@@ -141,6 +162,89 @@ func TestOutputFlushMetrics(t *testing.T) {
 		c.AddMetricSamples([]metrics.SampleContainer{samples})
 		c.AddMetricSamples([]metrics.SampleContainer{samples})
 	})
+}
+
+// Exercise the native v3 API and final flush at every supported precision.
+func TestOutputWriteV3(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ precision, apiPrecision, timestamp string }{
+		{"1ns", "nanosecond", "1700000000123456789"},
+		{"1us", "microsecond", "1700000000123456"},
+		{"1ms", "millisecond", "1700000000123"},
+		{"1s", "second", "1700000000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.precision, func(t *testing.T) {
+			t.Parallel()
+			received := make(chan string, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPost, r.Method)
+				assert.Equal(t, "/api/v3/write_lp", r.URL.Path)
+				assert.Equal(t, "test-db", r.URL.Query().Get("db"))
+				assert.False(t, r.URL.Query().Has("bucket"))
+				assert.False(t, r.URL.Query().Has("org"))
+				assert.Equal(t, tc.apiPrecision, r.URL.Query().Get("precision"))
+				assert.Equal(t, "false", r.URL.Query().Get("accept_partial"))
+				assert.Equal(t, "false", r.URL.Query().Get("no_sync"))
+				assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+				assert.Equal(t, "text/plain; charset=utf-8", r.Header.Get("Content-Type"))
+				body, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				received <- string(body)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			out, err := New(output.Params{
+				Logger: logrus.New(), ConfigArgument: server.URL,
+				Environment: map[string]string{
+					"K6_INFLUXDB_DATABASE": "test-db", "K6_INFLUXDB_TOKEN": "test-token",
+					"K6_INFLUXDB_PUSH_INTERVAL": "1h", "K6_INFLUXDB_PRECISION": tc.precision,
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, out.Start())
+			registry := metrics.NewRegistry()
+			metric, err := registry.NewMetric("test_gauge", metrics.Gauge)
+			require.NoError(t, err)
+			out.AddMetricSamples([]metrics.SampleContainer{metrics.Samples{{
+				TimeSeries: metrics.TimeSeries{
+					Metric: metric,
+					Tags: registry.RootTagSet().WithTagsFromMap(map[string]string{
+						"scenario": "default", "group": "", "vu": "21", "iter": "2", "url": "https://example.com",
+					}),
+				},
+				Time: time.Unix(1700000000, 123456789), Value: 2,
+			}}})
+			require.NoError(t, out.Stop())
+			select {
+			case body := <-received:
+				assert.Equal(t, "test_gauge,scenario=default iter=2i,url=\"https://example.com\",value=2,vu=21i "+tc.timestamp+"\n", body)
+			default:
+				t.Fatal("Stop did not flush the buffered metric")
+			}
+		})
+	}
+}
+
+func TestOutputReportsWriteFailure(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "schema conflict", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	out, err := New(output.Params{Logger: logrus.New(), ConfigArgument: server.URL + "/test"})
+	require.NoError(t, err)
+	require.NoError(t, out.Start())
+	registry := metrics.NewRegistry()
+	metric, err := registry.NewMetric("gauge", metrics.Gauge)
+	require.NoError(t, err)
+	out.AddMetricSamples([]metrics.SampleContainer{metrics.Samples{{
+		TimeSeries: metrics.TimeSeries{Metric: metric, Tags: registry.RootTagSet()},
+		Value:      1, Time: time.Now(),
+	}}})
+	err = out.Stop()
+	require.ErrorContains(t, err, "400 Bad Request")
+	require.ErrorContains(t, err, "schema conflict")
 }
 
 func TestMakeFieldKinds(t *testing.T) {

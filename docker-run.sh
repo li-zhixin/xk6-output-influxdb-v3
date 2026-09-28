@@ -5,7 +5,7 @@
 # the local environment established with the `docker-compose`.
 #
 # Each execution is provided a unique tag to differentiate
-# discrete test runs within the Grafana dashboard.
+# discrete test runs in InfluxDB 3 queries.
 #
 
 set -e

@@ -1,29 +1,21 @@
-// Package influxdb is a k6 output that sends metrics to an InfluxDB v2 database.
+// Package influxdb sends k6 metrics to the native InfluxDB 3 write API.
 package influxdb
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	influxdbclient "github.com/influxdata/influxdb-client-go/v2"
-	"github.com/influxdata/influxdb-client-go/v2/api"
-	"github.com/influxdata/influxdb-client-go/v2/api/write"
-	influxdblog "github.com/influxdata/influxdb-client-go/v2/log"
+	"github.com/influxdata/line-protocol/v2/lineprotocol"
 	"github.com/sirupsen/logrus"
 	"go.k6.io/k6/v2/metrics"
 	"go.k6.io/k6/v2/output"
 )
-
-func init() {
-	// disable the internal influxdb log
-	influxdblog.Log = nil
-}
 
 // FieldKind defines Enum for tag-to-field type conversion
 type FieldKind int
@@ -45,51 +37,47 @@ var _ output.Output = new(Output)
 type Output struct {
 	output.SampleBuffer
 
-	client influxdbclient.Client
 	config Config
 
 	params          output.Params
 	periodicFlusher *output.PeriodicFlusher
 	logger          logrus.FieldLogger
 	fieldKinds      map[string]FieldKind
-	pointWriter     api.WriteAPIBlocking
+	writer          *writeClient
 	semaphoreCh     chan struct{}
 	wg              sync.WaitGroup
+	errMu           sync.Mutex
+	flushErr        error
 }
 
 // New returns new InfluxDB Output
 func New(params output.Params) (*Output, error) {
-	logger := params.Logger.WithFields(logrus.Fields{"output": "InfluxDBv2"})
+	logger := params.Logger.WithFields(logrus.Fields{"output": "InfluxDBv3"})
 
 	conf, err := GetConsolidatedConfig(params.JSONConfig, params.Environment, params.ConfigArgument)
 	if err != nil {
 		return nil, err
 	}
-	if conf.Bucket.String == "" {
-		return nil, fmt.Errorf("the Bucket option is required")
+	if conf.Database.String == "" {
+		return nil, fmt.Errorf("the Database option is required")
 	}
 	if conf.ConcurrentWrites.Int64 <= 0 {
 		return nil, fmt.Errorf("the ConcurrentWrites option must be a positive number")
 	}
-	opts := influxdbclient.DefaultOptions().
-		SetTLSConfig(&tls.Config{
-			InsecureSkipVerify: conf.InsecureSkipTLSVerify.Bool, //nolint:gosec
-		})
-	if conf.Precision.Valid {
-		opts.SetPrecision(time.Duration(conf.Precision.Duration))
-	}
-	cl := influxdbclient.NewClientWithOptions(conf.Addr.String, conf.Token.String, opts)
 	fldKinds, err := makeFieldKinds(conf)
+	if err != nil {
+		return nil, err
+	}
+	writer, err := newWriteClient(conf)
 	if err != nil {
 		return nil, err
 	}
 	return &Output{
 		params:      params,
 		logger:      logger,
-		client:      cl,
 		config:      conf,
 		fieldKinds:  fldKinds,
-		pointWriter: cl.WriteAPIBlocking(conf.Organization.String, conf.Bucket.String),
+		writer:      writer,
 		semaphoreCh: make(chan struct{}, conf.ConcurrentWrites.Int64),
 		wg:          sync.WaitGroup{},
 	}, nil
@@ -97,7 +85,7 @@ func New(params output.Params) (*Output, error) {
 
 // Description returns a human-readable description of the output.
 func (o *Output) Description() string {
-	return fmt.Sprintf("InfluxDBv2 (%s)", o.config.Addr.String)
+	return fmt.Sprintf("InfluxDBv3 (%s)", o.config.Addr.String)
 }
 
 // Start initializes the SampleBuffer for collect samples.
@@ -116,10 +104,10 @@ func (o *Output) Start() error {
 func (o *Output) Stop() error {
 	o.logger.Debug("Stopping...")
 	o.periodicFlusher.Stop()
-	o.client.Close()
 	o.wg.Wait()
+	o.writer.httpClient.CloseIdleConnections()
 	o.logger.Debug("Stopped")
-	return nil
+	return o.flushErr
 }
 
 func (o *Output) extractTagsToValues(tags map[string]string, values map[string]any) map[string]any {
@@ -148,14 +136,15 @@ func (o *Output) extractTagsToValues(tags map[string]string, values map[string]a
 	return values
 }
 
-func (o *Output) batchFromSamples(containers []metrics.SampleContainer) []*write.Point {
+func (o *Output) batchFromSamples(containers []metrics.SampleContainer) ([]byte, error) {
 	type cacheItem struct {
 		tags   map[string]string
 		values map[string]any
 	}
 	cache := map[*metrics.TagSet]cacheItem{}
 
-	var points []*write.Point
+	var encoder lineprotocol.Encoder
+	encoder.SetPrecision(o.writer.precision)
 	for _, container := range containers {
 		samples := container.GetSamples()
 		for _, sample := range samples {
@@ -170,17 +159,30 @@ func (o *Output) batchFromSamples(containers []metrics.SampleContainer) []*write
 				cache[sample.Tags] = cacheItem{tags, values}
 			}
 			values["value"] = sample.Value
-			p := influxdbclient.NewPoint(
-				sample.Metric.Name,
-				tags,
-				values,
-				sample.Time,
-			)
-			points = append(points, p)
+			if _, exists := tags["value"]; exists {
+				return nil, fmt.Errorf("metric %s has a tag named value that conflicts with the metric field", sample.Metric.Name)
+			}
+			encoder.StartLine(sample.Metric.Name)
+			for _, key := range slices.Sorted(maps.Keys(tags)) {
+				if tags[key] != "" {
+					encoder.AddTag(key, tags[key])
+				}
+			}
+			for _, key := range slices.Sorted(maps.Keys(values)) {
+				value, ok := lineprotocol.NewValue(values[key])
+				if !ok {
+					return nil, fmt.Errorf("metric %s has an invalid value for field %s", sample.Metric.Name, key)
+				}
+				encoder.AddField(key, value)
+			}
+			encoder.EndLine(sample.Time)
+			if err := encoder.Err(); err != nil {
+				return nil, fmt.Errorf("encoding metric %s: %w", sample.Metric.Name, err)
+			}
 		}
 	}
 
-	return points
+	return encoder.Bytes(), nil
 }
 
 func (o *Output) flushMetrics() {
@@ -198,13 +200,22 @@ func (o *Output) flushMetrics() {
 		}()
 
 		start := time.Now()
-		batch := o.batchFromSamples(samples)
-
-		o.logger.WithField("samples", len(samples)).WithField("points", len(batch)).Debug("Sending metrics points...")
-		if err := o.pointWriter.WritePoint(context.Background(), batch...); err != nil {
+		batch, err := o.batchFromSamples(samples)
+		if err == nil && len(batch) == 0 {
+			return
+		}
+		if err == nil {
+			o.logger.WithField("bytes", len(batch)).Debug("Sending metrics points...")
+			err = o.writer.Write(context.Background(), batch)
+		}
+		if err != nil {
+			o.errMu.Lock()
+			if o.flushErr == nil {
+				o.flushErr = err
+			}
+			o.errMu.Unlock()
 			o.logger.WithError(err).
 				WithField("elapsed", time.Since(start)).
-				WithField("points", len(batch)).
 				Error("Couldn't send metrics points")
 			return
 		}
@@ -231,6 +242,9 @@ func makeFieldKinds(conf Config) (map[string]FieldKind, error) {
 			fieldName, fieldType = s[0], "string"
 		} else {
 			fieldName, fieldType = s[0], s[1]
+		}
+		if fieldName == "value" {
+			return nil, fmt.Errorf("value is reserved for the metric field and cannot be used in TagsAsFields")
 		}
 
 		err := checkDuplicatedTypeDefinitions(fieldKinds, fieldName)

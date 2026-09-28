@@ -1,29 +1,21 @@
-# xk6-output-influxdb
+# xk6-influxdbv2
 
-k6 output extension that ships test metrics to InfluxDB v2. Exists as a separate extension because the v2 API has breaking changes that cannot coexist with the v1 output bundled in k6 core.
+This fork is a k6 output extension for InfluxDB 3 Core / Enterprise only. The repository/module name remains github.com/li-zhixin/xk6-influxdbv2 and the registered output name remains xk6-influxdb.
 
 ## Architecture
 
-The extension registers itself via k6's output extension system at init time. A registration shim at the repo root delegates to the implementation package.
+register.go delegates to pkg/influxdb. Configuration combines defaults, JSON, K6_INFLUXDB_ environment variables, then the output URL. Database is required; the default server is http://localhost:8181. Bucket and organization are not supported.
 
-Configuration consolidates from three sources in priority order: JSON config from k6 options, environment variables (all prefixed with `K6_INFLUXDB_`), and the URL passed via k6's output argument. Each layer overrides the previous. The bucket name is required; the address defaults to localhost:8086.
+Samples are buffered and periodically encoded as line protocol. A semaphore bounds concurrent writes (default 4). The native client sends POST /api/v3/write_lp with db, precision, accept_partial=false, and no_sync=false. Authentication uses a Bearer token. The line-protocol/v2 Go module is a codec version, not a v2 HTTP API client.
 
-The output implementation buffers metric samples and flushes them to InfluxDB on a periodic interval. Flush runs in a goroutine pool bounded by a semaphore channel (default 4 concurrent writers). If a flush takes longer than the push interval, a warning is logged but no samples are dropped -- they queue for the next cycle.
+Tags listed in tagsAsFields move into typed fields. By default these are vu:int, iter:int, and url. Other nonempty tags remain tags. The numeric metric is the value field; that name is reserved. Conversion results are cached per tag set within a batch.
 
-Tags can be promoted to InfluxDB fields (making them non-indexable but queryable with more types) via a configuration option. Each promoted tag gets a type annotation (string/int/float/bool) parsed from a colon-delimited format. By default, VU number, iteration count, and URL are promoted to fields.
+Shutdown flushes buffered samples, waits for writers, then closes idle HTTP connections. Write errors are logged and the first error is returned by Stop. Requests have a configurable timeout (default 1 minute) and no automatic retries. The buffer can grow under sustained backpressure.
 
-The tag-to-field extraction mutates the tags map in place -- it deletes promoted keys from the tags map and adds them to the values map. This is cached per unique tag set pointer for the duration of a single flush batch to avoid repeated conversion.
+The Docker Compose example runs InfluxDB 3 and k6. Legacy v2 Flux dashboards are removed; use SQL or InfluxQL for visualization.
 
-The InfluxDB client's internal logger is explicitly disabled at init time to prevent noisy output.
+## Development
 
-A docker-compose setup provides InfluxDB, Grafana, and k6 for local testing, with pre-provisioned Grafana dashboards for visualizing test results.
+Use go test -race -timeout 60s ./... and go build ./.... Unit tests use httptest; no live database is needed. Build the local extension with xk6 build --with github.com/li-zhixin/xk6-influxdbv2=.. The trailing =. is essential to include local changes.
 
-## Gotchas
-
-- Flush errors are logged but silently swallowed. If InfluxDB is unreachable or rejects writes, metrics are lost with only a log line. There is no retry mechanism.
-
-- The semaphore channel blocks the periodic flusher goroutine when all concurrent write slots are occupied. Under sustained backpressure, this causes sample buffer growth in memory without bound.
-
-- The linter config is not checked in. It is downloaded from k6 core's master branch on first lint run. Do not commit it.
-
-- Tests mock the InfluxDB server with Go's httptest. No real InfluxDB instance is needed for unit tests.
+The linter configuration is downloaded using the k6-ci ref in .github/workflows/all.yml. Do not commit the generated configuration.

@@ -1,95 +1,86 @@
-# xk6-output-influxdb
-k6 extension for [InfluxDB v2](https://docs.influxdata.com/influxdb/v2.0), it adds the support for the latest `v2` version and the compatibility API for v1.8+.
+# xk6-influxdbv2
 
-#### **Why is this output not directly part of `k6` core?**
-The `k6` core already supports the [InfluxDB v1](https://k6.io/docs/results-visualization/influxdb-+-grafana) so the natural feeling would be to do the same for the `v2`. Unfortunately, the `v2` has introduced some breaking changes in the core parts of the API. This would make it difficult to support both versions without taking a bunch of compromises for maintaining the retro-compatibility or introducing breaking changes in the current user experience of the k6's InfluxDB output, with a high probability to create more confusion for k6's users. For this main reason, the `k6` development team has decided to create a new and independent extension for InfluxDB v2.
+k6 output extension for **InfluxDB 3 Core / Enterprise**, using the native [`POST /api/v3/write_lp`](https://docs.influxdata.com/influxdb3/core/write-data/http-api/v3-write-lp/) endpoint. The repository and Go module retain their existing name; the output now targets InfluxDB 3 only.
 
-# Install
+## Build
 
-To build a `k6` binary with this extension, first ensure you have the prerequisites:
-
-- [Go toolchain](https://go101.org/article/go-toolchain.html)
-- Git
-- [xk6](https://github.com/grafana/xk6#install)
-
-1. Build with `xk6`:
+Install Go (see `go.mod`), Git, and [xk6](https://github.com/grafana/xk6). To build from this checkout:
 
 ```bash
-xk6 build --with github.com/li-zhixin/xk6-influxdbv2
+xk6 build --with github.com/li-zhixin/xk6-influxdbv2=.
 ```
 
-This will result in a `k6` binary in the current directory.
-
-2. Run with the just built `k6` binary:
+The `=.` ensures that your local changes are included. To build a published revision instead:
 
 ```bash
-K6_INFLUXDB_ORGANIZATION=<insert-here-org-name> \
-K6_INFLUXDB_BUCKET=<insert-here-bucket-name> \
-K6_INFLUXDB_TOKEN=<insert-here-valid-token> \
-./k6 run -o xk6-influxdb=http://localhost:8086 <script.js>
+xk6 build --with github.com/li-zhixin/xk6-influxdbv2@main
 ```
 
-**Using Docker**
+## Run
 
-This [Dockerfile](./Dockerfile) builds a docker image with the k6 binary.
+Create an InfluxDB 3 database and a token with write access, then run:
+
+```bash
+K6_INFLUXDB_DATABASE=k6 \
+K6_INFLUXDB_TOKEN='<your-influxdb3-token>' \
+./k6 run -o xk6-influxdb=http://localhost:8181 script.js
+```
+
+The output name remains `xk6-influxdb`. The database can also be set in the output URL: `-o xk6-influxdb=http://localhost:8181/k6`.
 
 ## Configuration
 
-Options for fine-grained control for flushing and connections.
+Configuration priority is **defaults < JSON < environment < output URL**. The URL sets the server address and, when present, the database path. JSON keys are shown below.
 
+| Environment variable | JSON key | Default | Description |
+| --- | --- | --- | --- |
+| `K6_INFLUXDB_ADDR` | `addr` | `http://localhost:8181` | InfluxDB 3 server URL. |
+| `K6_INFLUXDB_DATABASE` | `database` | required | Database name, sent as the `db` query parameter. |
+| `K6_INFLUXDB_TOKEN` | `token` | empty | Sent as `Authorization: Bearer <token>`. May be omitted for a server with authentication disabled. |
+| `K6_INFLUXDB_PUSH_INTERVAL` | `pushInterval` | `1s` | Interval between metric flushes. |
+| `K6_INFLUXDB_CONCURRENT_WRITES` | `concurrentWrites` | `4` | Maximum concurrent write requests. |
+| `K6_INFLUXDB_WRITE_TIMEOUT` | `writeTimeout` | `1m` | Timeout for each write request; must be positive. |
+| `K6_INFLUXDB_PRECISION` | `precision` | `1ns` | `1ns`, `1us`, `1ms`, or `1s`. Both encoded timestamps and API precision use this setting. |
+| `K6_INFLUXDB_TAGS_AS_FIELDS` | `tagsAsFields` | `vu:int,iter:int,url` | Tags to convert to fields. Types: `string`, `int`, `float`, `bool`. JSON uses an array of strings. |
+| `K6_INFLUXDB_INSECURE` | `insecureSkipTLSVerify` | `false` | Skip TLS certificate verification. |
 
-| ENV | Default | Description |
-|-----|---------|-------------|
-| K6_INFLUXDB_ORGANIZATION      |                       | The [Organization](https://docs.influxdata.com/influxdb/v2.0/reference/glossary/#organization). |
-| K6_INFLUXDB_BUCKET            |                       | The [Bucket](https://docs.influxdata.com/influxdb/v2.0/reference/glossary/#bucket). |
-| K6_INFLUXDB_TOKEN             |                       | The [Token](https://docs.influxdata.com/influxdb/v2.0/reference/glossary/#token). |
-| K6_INFLUXDB_ADDR              | http://localhost:8086 | The address of the instance. |
-| K6_INFLUXDB_PUSH_INTERVAL     | 1s | The flush's frequency of the `k6` metrics. |
-| K6_INFLUXDB_CONCURRENT_WRITES | 4 | Number of concurrent requests for flushing data. It is useful when a request takes more than the expected time (more than flush interval). |
-| K6_INFLUXDB_TAGS_AS_FIELDS    | vu:int,iter:int,url | A comma-separated string to set `k6` metrics as non-indexable fields (instead of tags). An optional type can be specified using :type as in vu:int will make the field integer. The possible field types are int, bool, float and string, which is the default. Example: vu:int,iter:int,url:string,event_time:int. |
-| K6_INFLUXDB_INSECURE          | false | When `true`, it will skip `https` certificate verification. |
-| K6_INFLUXDB_PRECISION         | 1ns | The timestamp [Precision](https://docs.influxdata.com/influxdb/v2.0/reference/glossary/#precision). |
+Each metric name becomes an InfluxDB table; its numeric value is stored in the `value` field. Other tags remain tags except those configured as fields. Empty tag values are omitted. Keep field types consistent across writes and do not use `value` as a custom tag or in `tagsAsFields`.
 
+Writes use `accept_partial=false` and `no_sync=false`: an invalid batch is rejected as a whole, and acknowledgements wait for WAL persistence. Write failures are logged and the first failure is returned when the output stops. Requests have a timeout and are not automatically retried. Shutdown flushes buffered samples and waits for active requests.
 
-# Docker Compose
+This is a breaking change from the earlier v2 implementation: use `K6_INFLUXDB_DATABASE` instead of `K6_INFLUXDB_BUCKET`, remove `K6_INFLUXDB_ORGANIZATION`, and point the output at an InfluxDB 3 server. No v1/v2 write endpoints are used. The line-protocol codec's Go module version (`/v2`) refers to that library's version, not the InfluxDB HTTP API.
 
-This repo includes a [docker-compose.yml](./docker-compose.yml) file that starts InfluxDB, Grafana and k6. This is just a quick setup to show the usage; for real use case you might want to deploy outside of docker, use volumes and probably update versions.
+## Local Docker example
 
-Clone the repo to get started and follow these steps: 
+The Compose example runs InfluxDB 3 and a locally built k6 extension:
 
-1. Put your k6 scripts in the `samples` directory or use the `http_2.js` example.
+```bash
+docker compose up -d influxdb
+docker compose exec influxdb influxdb3 create token --admin
+```
 
-2. Start the docker compose environment.
-   
-	```shell
-	docker compose up -d
-	```
+Copy the generated token, create the database, and run the included smoke script:
 
-	```shell
-	# Output
-	Creating xk6-output-influxdb_influxdb_1 ... done
-	Creating xk6-output-influxdb_k6_1       ... done
-	Creating xk6-output-influxdb_grafana_1  ... done
-	```
+```bash
+export K6_INFLUXDB_TOKEN='<generated-token>'
+docker compose exec -e INFLUXDB3_AUTH_TOKEN="$K6_INFLUXDB_TOKEN" influxdb influxdb3 create database k6
+docker compose run --rm --build k6 run /scripts/influxdb3.js
+```
 
-3. Use the k6 Docker image to run the k6 script and send metrics to the InfluxDB container started on the previous step. You must [set the `testid` tag](https://k6.io/docs/using-k6/tags-and-groups/#test-wide-tags) with a unique identifier to segment the metrics into discrete test runs for the Grafana dashboards.
-    ```shell
-    docker compose run --rm -T k6 run -<samples/http_2.js --tag testid=<SOME-ID>
-    ```
-   For convenience, the `docker-run.sh` can be used to simply:
-    ```shell
-    ./docker-run.sh samples/http_2.js
-    ```
+Read the written samples using SQL:
 
-4. Visit http://localhost:3000/ to view results in Grafana. 
-	> This repository includes a [basic dashboard](./grafana/dashboards/dashboard.yml). If you want to build a custom Dashboard, contact the k6 team in Slack.
+```bash
+docker compose exec -e INFLUXDB3_AUTH_TOKEN="$K6_INFLUXDB_TOKEN" influxdb \
+  influxdb3 query --database k6 'SELECT * FROM k6_smoke ORDER BY time'
+```
 
+The previous Flux dashboards have been removed. For Grafana, configure an InfluxDB 3 data source with SQL or InfluxQL queries.
 
-### Compatibility API
-The v2 includes a [InfluxDB v1.8+ compatibility API](https://docs.influxdata.com/influxdb/v2.0/reference/api/influxdb-1x) that adds endpoints for communicating with an InfluxDB v1.
+## Development
 
->[Client API usage differences summary](https://github.com/influxdata/influxdb-client-go#influxdb-18-api-compatibility):
->
->    1. Use the form username:password for an authentication token. Example: my-user:my-password. Use an empty string ("") if the server doesn't require authentication.
->    2. The organization parameter is not used. Use an empty string ("") where necessary.
->    3. Use the form database/retention-policy where a bucket is required. Skip retention policy if the default retention policy should be used. Examples: telegraf/autogen, telegraf.
+```bash
+go test -race -timeout 60s ./...
+go build ./...
+```
+
+Tests use local HTTP servers to check native v3 requests, precision, authentication, TLS, timeouts, and error reporting.

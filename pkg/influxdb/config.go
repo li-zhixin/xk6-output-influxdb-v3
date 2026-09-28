@@ -14,23 +14,25 @@ import (
 // Config contains the configuration for the Output.
 type Config struct {
 	Addr                  null.String        `json:"addr" envconfig:"K6_INFLUXDB_ADDR"`
-	Organization          null.String        `json:"organization" envconfig:"K6_INFLUXDB_ORGANIZATION"`
-	Bucket                null.String        `json:"bucket" envconfig:"K6_INFLUXDB_BUCKET"`
+	Database              null.String        `json:"database" envconfig:"K6_INFLUXDB_DATABASE"`
 	Token                 null.String        `json:"token" envconfig:"K6_INFLUXDB_TOKEN"`
 	InsecureSkipTLSVerify null.Bool          `json:"insecureSkipTLSVerify" envconfig:"K6_INFLUXDB_INSECURE"`
 	PushInterval          types.NullDuration `json:"pushInterval" envconfig:"K6_INFLUXDB_PUSH_INTERVAL"`
 	ConcurrentWrites      null.Int           `json:"concurrentWrites" envconfig:"K6_INFLUXDB_CONCURRENT_WRITES"`
 	Precision             types.NullDuration `json:"precision" envconfig:"K6_INFLUXDB_PRECISION"`
+	WriteTimeout          types.NullDuration `json:"writeTimeout" envconfig:"K6_INFLUXDB_WRITE_TIMEOUT"`
 	TagsAsFields          []string           `json:"tagsAsFields,omitempty" envconfig:"K6_INFLUXDB_TAGS_AS_FIELDS"`
 }
 
 // NewConfig creates a new InfluxDB output config with some default values.
 func NewConfig() Config {
 	c := Config{
-		Addr:             null.NewString("http://localhost:8086", false),
+		Addr:             null.NewString("http://localhost:8181", false),
 		TagsAsFields:     []string{"vu:int", "iter:int", "url"},
 		ConcurrentWrites: null.NewInt(4, false),
 		PushInterval:     types.NewNullDuration(time.Second, false),
+		Precision:        types.NewNullDuration(time.Nanosecond, false),
+		WriteTimeout:     types.NewNullDuration(time.Minute, false),
 	}
 	return c
 }
@@ -40,11 +42,8 @@ func (c Config) Apply(cfg Config) Config {
 	if cfg.Addr.Valid {
 		c.Addr = cfg.Addr
 	}
-	if cfg.Organization.Valid {
-		c.Organization = cfg.Organization
-	}
-	if cfg.Bucket.Valid {
-		c.Bucket = cfg.Bucket
+	if cfg.Database.Valid {
+		c.Database = cfg.Database
 	}
 	if cfg.Token.Valid {
 		c.Token = cfg.Token
@@ -63,6 +62,9 @@ func (c Config) Apply(cfg Config) Config {
 	}
 	if cfg.Precision.Valid {
 		c.Precision = cfg.Precision
+	}
+	if cfg.WriteTimeout.Valid {
+		c.WriteTimeout = cfg.WriteTimeout
 	}
 	return c
 }
@@ -84,8 +86,8 @@ func parseURL(text string) (Config, error) {
 	if u.Host != "" {
 		c.Addr = null.StringFrom(u.Scheme + "://" + u.Host)
 	}
-	if bucket := strings.TrimPrefix(u.Path, "/"); bucket != "" {
-		c.Bucket = null.StringFrom(bucket)
+	if database := strings.TrimPrefix(u.Path, "/"); database != "" {
+		c.Database = null.StringFrom(database)
 	}
 	return c, err
 }
