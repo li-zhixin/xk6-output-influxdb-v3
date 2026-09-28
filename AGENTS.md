@@ -1,6 +1,6 @@
-# xk6-influxdbv2
+# xk6-output-influxdb-v3
 
-This fork is a k6 output extension for InfluxDB 3 Core / Enterprise only. The repository/module name remains github.com/li-zhixin/xk6-influxdbv2 and the registered output name remains xk6-influxdb.
+This fork is a k6 output extension for InfluxDB 3 Core / Enterprise only. The Go module is github.com/li-zhixin/xk6-output-influxdb-v3 and the registered output name remains xk6-influxdb.
 
 ## Architecture
 
@@ -16,6 +16,6 @@ The Docker Compose example runs InfluxDB 3 and k6. Legacy v2 Flux dashboards are
 
 ## Development
 
-Use go test -race -timeout 60s ./... and go build ./.... Unit tests use httptest; no live database is needed. Build the local extension with xk6 build --with github.com/li-zhixin/xk6-influxdbv2=.. The trailing =. is essential to include local changes.
+Use go test -race -timeout 60s ./... and go build ./.... Unit tests use httptest; no live database is needed. Build the local extension with xk6 build --with github.com/li-zhixin/xk6-output-influxdb-v3=.. The trailing =. is essential to include local changes.
 
 The linter configuration is downloaded using the k6-ci ref in .github/workflows/all.yml. Do not commit the generated configuration.

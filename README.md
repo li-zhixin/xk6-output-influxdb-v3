@@ -1,19 +1,19 @@
-# xk6-influxdbv2
+# xk6-output-influxdb-v3
 
-k6 output extension for **InfluxDB 3 Core / Enterprise**, using the native [`POST /api/v3/write_lp`](https://docs.influxdata.com/influxdb3/core/write-data/http-api/v3-write-lp/) endpoint. The repository and Go module retain their existing name; the output now targets InfluxDB 3 only.
+k6 output extension for **InfluxDB 3 Core / Enterprise**, using the native [`POST /api/v3/write_lp`](https://docs.influxdata.com/influxdb3/core/write-data/http-api/v3-write-lp/) endpoint. This extension targets InfluxDB 3 only.
 
 ## Build
 
 Install Go (see `go.mod`), Git, and [xk6](https://github.com/grafana/xk6). To build from this checkout:
 
 ```bash
-xk6 build --with github.com/li-zhixin/xk6-influxdbv2=.
+xk6 build --with github.com/li-zhixin/xk6-output-influxdb-v3=.
 ```
 
 The `=.` ensures that your local changes are included. To build a published revision instead:
 
 ```bash
-xk6 build --with github.com/li-zhixin/xk6-influxdbv2@main
+xk6 build --with github.com/li-zhixin/xk6-output-influxdb-v3@main
 ```
 
 ## Run

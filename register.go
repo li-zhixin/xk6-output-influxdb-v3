@@ -2,7 +2,7 @@
 package influxdb
 
 import (
-	"github.com/li-zhixin/xk6-influxdbv2/pkg/influxdb"
+	"github.com/li-zhixin/xk6-output-influxdb-v3/pkg/influxdb"
 	"go.k6.io/k6/v2/output"
 )
 

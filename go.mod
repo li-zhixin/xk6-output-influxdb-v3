@@ -1,4 +1,4 @@
-module github.com/li-zhixin/xk6-influxdbv2
+module github.com/li-zhixin/xk6-output-influxdb-v3
 
 go 1.26.0
 
